@@ -1,0 +1,453 @@
+---
+title: "HeartProj_DecisionTrees"
+author: "poojabhatia"
+date: "5/28/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Importing libraries
+```{r}
+library(ggplot2)
+library(randomForest)
+library(tree)
+library(randomForest)
+library(boot)
+library(tidyverse)
+library(caret)
+library(adabag)
+library(e1071)
+```
+
+Loading data from csv
+```{r}
+heart = read.csv('/Users/poojabhatia/Downloads/heart_failure_clinical_records_dataset.csv')
+```
+converting to variables to factors 
+```{r}
+heart$DEATH_EVENT <- as.factor(if_else(heart$DEATH_EVENT ==1 ,"Yes" , "No"))
+heart$anaemia <- as.factor(heart$anaemia)
+heart$diabetes <- as.factor(heart$diabetes)
+heart$high_blood_pressure  <- as.factor(heart$high_blood_pressure)
+heart$sex  <- as.factor(heart$sex)
+heart$smoking  <-  as.factor(if_else(heart$smoking ==1 ,"Yes" , "No"))
+#heart$sex  <- as.factor(heart$sex)
+```
+
+Renaming the variables
+```{r}
+heart = rename(heart ,  "Death_Event" ="DEATH_EVENT" )
+heart = rename(heart ,  "Anaemia" ="anaemia" )
+heart = rename(heart ,  "Diabetes" ="diabetes" )
+heart = rename(heart ,  "High_Blood_Pressure" ="high_blood_pressure" )
+heart = rename(heart ,  "Sex" ="sex" )
+heart = rename(heart ,  "Age" ="age" )
+heart = rename(heart ,  "Smoking" ="smoking" )
+heart = rename(heart ,  "Creatinine_Phosphokinase" ="creatinine_phosphokinase" )
+heart = rename(heart ,  "Ejection_Fraction" ="ejection_fraction" )
+heart = rename(heart ,  "Serum_Creatinine" ="serum_creatinine" )
+heart = rename(heart ,  "Serum_Sodium" ="serum_sodium" )
+heart = rename(heart ,  "Time" ="time" )
+
+```
+
+
+```{r}
+#Split to train_df and test_df 
+
+train <- sample(nrow(heart) * 0.7)
+train_df  <- heart[train, ]
+test_df <- heart[-train, ]
+```
+
+
+
+Decision Tree with all predictors but time
+```{r}
+#Model with all predictors
+tree.heart <- tree(Death_Event ~ .-Time, data = train_df, control = tree.control(nrow(train_df), mindev = 0, minsize = 3))
+summary(tree.heart)
+```
+Cross validation of tree
+```{r}
+cv.heart <- cv.tree(tree.heart,FUN = prune.misclass)
+plot(cv.heart$size, cv.heart$dev, type = "b" , xlab= "size" , ylab ="deviance")  
+plot(cv.heart$k, cv.heart$dev, type = "b" , xlab= "K" , ylab ="deviance")
+``` 
+Pruning the tree at 9 nodes
+```{r}
+  prune.heart <- prune.tree(tree.heart, best = 9)
+  plot(prune.heart)
+  text(prune.heart, pretty = 0)
+```
+Predict the test_df data and check confusion matrix
+```{r}
+yhat <- predict(prune.heart, newdata = test_df, type="class")
+
+table(yhat, test_df$Death_Event)
+```
+
+test_df accuracy from Pruned tree
+```{r}
+mean(yhat == test_df$Death_Event)
+```
+
+Bagging and Random Forest
+```{r}
+npredictors = 13
+rf_bag<- randomForest(Death_Event ~ .-Time, 
+                           data=train_df,
+                           ntree = 500,
+                           mtry=(npredictors-2), 
+                           importance=TRUE)
+
+rf_sqrt_n <- randomForest(Death_Event ~ .-Time, 
+                           data=train_df,
+                           ntree = 500,
+                           mtry=sqrt(npredictors-2), 
+                           importance=TRUE)
+
+rf_half_n <- randomForest(Death_Event ~ .-Time, 
+                           data=train_df,
+                           ntree = 500,
+                           mtry=(npredictors-2)/2, 
+                           importance=TRUE)
+
+```
+test_dfing on bagged model
+```{r}
+predicted_event<-predict(rf_bag, newdata = test_df)
+table(predicted_event, test_df$Death_Event)
+cat("error rate : ", mean(predicted_event == test_df$Death_Event))
+test_df["RF_bag"] = yhat
+```
+test_dfing on RF model with half predictors
+```{r}
+predicted_event<-predict(rf_half_n, newdata = test_df)
+table(predicted_event, test_df$Death_Event)
+cat("error rate : ",  mean(predicted_event == test_df$Death_Event))
+test_df["rf_half_n"] = yhat
+```
+test_dfing  on RF model with sqrt of predictors
+```{r}
+predicted_event<-predict(rf_sqrt_n, newdata = test_df)
+
+table(predicted_event, test_df$Death_Event)
+cat("error rate : ",  mean(predicted_event == test_df$Death_Event))
+test_df["rf_sqrt_n"] = yhat
+```
+Plotting important predictors
+```{r}
+par(mfrow = c(2, 2))
+varImpPlot(rf_bag,type =1,adjust_ylab=1.5 , main = "Bagging" )
+varImpPlot(rf_sqrt_n,type =1,adjust_ylab=1.5 , main ="RF, m=sqrt(p)")
+varImpPlot(rf_half_n,n.var = 10,type =1,adjust_ylab=1.5 , main = "RF, m=p/2")
+
+```
+Fetch OOB error ofr above three models
+```{r}
+event_error <- data.frame(
+  Trees=1:rf_bag$ntree,
+  Error=c(rf_bag$err.rate[,"OOB"],rf_sqrt_n$err.rate[,"OOB"], rf_half_n$err.rate[,"OOB"]),
+  Type=rep(c("Bag", "RF, m=sqrt(p)", "RF, m=p/2"), each=rf_bag$ntree)
+)
+```
+Plotting OOB error
+```{r}
+ggplot(data=event_error, aes(x=Trees, y=Error)) + ggtitle("OOB Error vs Number of Trees") +geom_smooth(method = "loess" , aes(color=Type)) + ylim(.2,.5)
+```
+
+
+
+
+
+
+
+Boosting
+
+```{r}
+Boost = boosting(Death_Event ~ .-Time, 
+                           data=train_df, boos=TRUE, mfinal=500)
+```
+```{r}
+mean(Boost$class ==train_df$Death_Event)
+```
+Predicting the test_df data on Boosted model
+```{r}
+pred <- predict(Boost, newdata = test_df , type ="response")
+#test_df["Boost"] =pred$class
+mean(pred$class ==test_df$Death_Event)
+```
+
+```{r}
+#Split to train_df and test_df 
+set.seed(123)
+train <- sample(nrow(heart) * 0.6)
+train_df  <- heart[train, ]
+test_df <- heart[-train, ]
+```
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+SVM
+
+SVM model with linear kernal
+```{r}
+#kernel=Linear
+ 
+svmfit.linear <- svm(Death_Event ~ Ejection_Fraction + Serum_Creatinine,
+              data = train_df ,
+              kernel = "linear",
+              cost = 10,
+              scale = FALSE)
+```
+
+```{r}
+predict.linear <- predict(svmfit.linear, test_df )
+mean(predict.linear==test_df$Death_Event)
+table(predict.linear,test_df$Death_Event)
+
+plot(svmfit.linear, data = test_df , Ejection_Fraction~Serum_Creatinine)
+```
+
+
+tune Linear SVM model
+```{r}
+cost_power_range <- seq(-2, 2, 0.5)
+cost_range <- 10^cost_power_range
+
+number <- 10
+repeats <- 3
+
+cv_matrix <- matrix(nrow = length(cost_power_range))
+
+set.seed(666)
+
+  svm_linear_tune <- tune(svm, as.factor(Death_Event) ~ Ejection_Fraction+Serum_Creatinine, data = train_df, kernel = "linear", scale = TRUE,  ranges = list( cost = cost_range), tunecontrol = tune.control(sampling = "cross", cross = number))
+
+svm_linear_tune$performances
+```
+
+
+plot linear model to different cost values
+```{r}
+ggplot(svm_linear_tune$performances, aes(x = cost, y = error , col ="red")) + 
+  geom_line() + 
+  geom_point( show.legend = F, size = 3) + 
+  scale_shape_manual(values = c(20, 19)) +
+  scale_x_continuous(trans = 'log10', breaks = cost_range, minor_breaks = NULL, labels = paste0("10^", cost_power_range)) + 
+  scale_y_continuous(labels = scales::percent_format(accuracy=1L)) +
+ 
+  coord_cartesian(ylim = c(.2, 0.5)) +
+  theme(axis.text.x = ggtext::element_markdown(), 
+        legend.text = ggtext::element_markdown(), 
+        legend.position = "bottom") +
+  labs(title = "SVM (Linear Kernel)", 
+       subtitle = "Selecting cost parameters using cross-validation",
+       x = "Cost", 
+       y = "CV Error")
+```
+
+
+plot the best linear model
+```{r}
+predict.linear.tune <- predict(svm_linear_tune$best.model, test_df)
+mean(svm_linear_tune == test_df$Death_Event)
+
+
+
+plot(svm_linear_tune$best.model, data = test_df , Ejection_Fraction~Serum_Creatinine)
+
+```
+Radial SVM model
+```{r}
+svmfit.radial <- svm(Death_Event ~Ejection_Fraction+Serum_Creatinine ,
+              data = train_df ,
+              kernel = "radial",
+              cost = 1,
+              gamma = 1,
+              scale = FALSE)
+
+pred = predict(svmfit.radial, test_df)
+mean(pred == test_df$Death_Event)
+
+table(pred,test_df$Death_Event)
+
+```
+
+Tuning Radial model with different gamma and cost values
+```{r}
+cost_power_range <- seq(-2, 2, 0.5)
+cost_range <- 10^cost_power_range
+gamma_power_range <- -2:2
+gamma_range <- 10^gamma_power_range
+number <- 10
+repeats <- 3
+
+cv_matrix <- matrix(nrow = length(cost_power_range)*length(gamma_power_range), ncol = repeats)
+
+set.seed(666)
+for (i in 1:repeats) {
+  svm_radial_tune <- tune(svm, as.factor(Death_Event) ~ Ejection_Fraction+Serum_Creatinine, data = train_df, kernel = "radial", scale = TRUE, ranges = list(gamma = gamma_range, cost = cost_range), tunecontrol = tune.control(sampling = "cross", cross = number))
+  cv_matrix[ ,i] <- svm_radial_tune$performances$error
+}
+
+svm_radial_df <- cbind(svm_radial_tune$performances[ ,c("gamma", "cost")], CV_error = rowMeans(cv_matrix)) %>%
+  mutate(min_CV_error = as.numeric(CV_error == min(CV_error)))
+```
+
+
+```{r}
+svm_radial_tune$performances
+```
+
+Plotting cost vs error  for different gamma value for Radial SVM models
+```{r}
+svm_radial_tune$best.parameters
+
+ggplot(svm_radial_df, aes(x = cost, y = CV_error, col = factor(gamma))) + 
+  geom_line() + 
+  geom_point(aes(shape = factor(min_CV_error)), show.legend = F, size = 3) + 
+  scale_shape_manual(values = c(20, 19)) +
+  scale_x_continuous(trans = 'log10', breaks = cost_range, minor_breaks = NULL, labels = paste0("10^", cost_power_range)) + 
+  scale_y_continuous(labels = scales::percent_format(accuracy=1L)) +
+  scale_color_discrete(labels = paste0("10^", gamma_power_range)) +
+  coord_cartesian(ylim = c(.2, 0.5)) +
+  theme(axis.text.x = ggtext::element_markdown(), 
+        legend.text = ggtext::element_markdown(), 
+        legend.position = "bottom") +
+  labs(title = "SVM (Radial Kernel)", 
+       subtitle = "Selecting cost & gamma parameters using cross-validation",
+       x = "Cost", 
+       y = "CV Error", 
+       col = "Gamma")
+```
+Best radial model
+```{r}
+svmfit.radial <- svm(Death_Event ~Ejection_Fraction+Serum_Creatinine ,
+              data = train_df ,
+              kernel = "radial",
+              cost = 0.3,
+              gamma = 1,
+              scale = FALSE)
+
+pred = predict(svmfit.radial, test_df)
+mean(pred == test_df$Death_Event)
+
+table(pred,test_df$Death_Event)
+
+```
+
+Polynomial SVM model
+```{r}
+svmfit.polynomial <- svm(Death_Event ~Ejection_Fraction+Serum_Creatinine ,
+              data = train_df ,
+              kernel = "polynomial",
+              cost = 1,
+              degree = 2,
+              scale = FALSE)
+
+pred = predict(svmfit.polynomial, test_df)
+mean(pred == test_df$Death_Event)
+
+table(pred,test_df$Death_Event)
+
+```
+
+tuning Polynomial model with different cost and degrees
+```{r}
+power_range <- seq(1, 3, 0.5)
+cost_range <- 10^power_range
+degree_range <- 2:5
+number <- 5
+repeats <- 2
+
+cv_matrix <- matrix(nrow = length(cost_range)*length(degree_range), ncol = repeats)
+
+set.seed(151)
+for (i in 1:repeats) {
+  svm_poly_tune <- tune.svm( as.factor(Death_Event) ~ Ejection_Fraction+Serum_Creatinine, data = train_df, kernel = "polynomial", scale = TRUE, degree = degree_range, cost = cost_range)
+  
+  cv_matrix[ ,i] <- svm_poly_tune$performances$error
+}
+
+svm_poly_df <- cbind(svm_poly_tune$performances[ ,c("degree", "cost")], CV_error = rowMeans(cv_matrix)) %>%
+mutate(min_CV_error = as.numeric(CV_error == min(CV_error)))
+
+```
+
+```{r}
+svm_poly_df
+```
+
+plotting cost vs error for range of degree 
+```{r}
+
+ggplot(svm_poly_df, aes(x = cost, y = CV_error, col = factor(degree))) + 
+  geom_line() + 
+  geom_point(aes(shape = factor(min_CV_error)), show.legend = F, size = 3) + 
+  scale_shape_manual(values = c(20, 19)) +
+  scale_x_continuous(trans = 'log10', breaks = cost_range, minor_breaks = NULL, labels = paste0("10^", power_range)) + 
+  scale_y_continuous(labels = scales::percent_format(accuracy=1L)) +
+  scale_color_discrete(labels =  degree_range) +
+  coord_cartesian(ylim = c(.2, 0.5)) +
+  theme(axis.text.x = ggtext::element_markdown(), 
+        legend.text = ggtext::element_markdown(), 
+        legend.position = "bottom") +
+  labs(title = "SVM (Polynomial Kernel)", 
+       subtitle = "Selecting cost & degree parameters using cross-validation",
+       x = "Cost", 
+       y = "CV Error", 
+       col = "Degree")
+```
+best polynomial model
+```{r}
+svmfit.polynomial <- svm(Death_Event ~Ejection_Fraction+Serum_Creatinine ,
+              data = train_df ,
+              kernel = "polynomial",
+              cost = 10,
+              degree = 3,
+              scale = FALSE)
+
+pred = predict(svmfit.polynomial, test_df)
+mean(pred == test_df$Death_Event)
+
+table(pred,test_df$Death_Event)
+plot(svmfit.polynomial, data = test_df , Ejection_Fraction~Serum_Creatinine ,main="SVM Polynomial Plot with cost =10 and degree =3 ")
+
+```
+To change the title in SVM plot
+
+Change the function to 
+
+function (x, data, formula = NULL, fill = TRUE, grid = 50, slice = list(), 
+  symbolPalette = palette(), svSymbol = "x", dataSymbol = "o", 
+  main="SVN classification plot", ...)
+  
+  change line 56 to 
+  title(main = main,
+  
+  referred from https://stackoverflow.com/questions/20089714/is-there-a-workaround-to-change-the-plot-svm-hardcoded-title
+  
+  
+
+```{r}
+myplotSVM <- e1071:::plot.svm
+environment(myplotSVM)  <- .GlobalEnv
+#fix(myplotSVM)
+```
+
+```{r}
+
+myplotSVM(svmfit.polynomial, data = test_df , Ejection_Fraction~Serum_Creatinine ,main="SVM Polynomial Plot with cost =10 and degree =3 ")
+
+myplotSVM(svmfit.radial, data = test_df , Ejection_Fraction~Serum_Creatinine,main="SVM Radial Plot with cost =0.316 and gamma =1 ")
+
+myplotSVM(svmfit.linear, data = test_df , Ejection_Fraction~Serum_Creatinine,main="SVM Linear Plot with cost =1 ")
+
+```
+
